@@ -108,6 +108,21 @@ pub struct ObjectStore {
     pub commit_handler: Arc<dyn CommitHandler>,
 }
 
+pub trait ObjectStoreProvider: std::fmt::Debug + Sync + Send {
+    fn new_store(&self, base_path: Url) -> Result<ObjectStore>;
+}
+
+#[derive(Default, Debug)]
+pub struct ObjectStoreRegistry {
+    providers: HashMap<String, Box<dyn ObjectStoreProvider>>,
+}
+
+impl ObjectStoreRegistry {
+    pub fn insert(&mut self, scheme: &str, provider: Box<dyn ObjectStoreProvider>) {
+        self.providers.insert(scheme.into(), provider);
+    }
+}
+
 impl std::fmt::Display for ObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ObjectStore({})", self.scheme)
@@ -341,13 +356,16 @@ impl ObjectStore {
     ///
     /// Returns the ObjectStore instance and the absolute path to the object.
     pub async fn from_uri(uri: &str) -> Result<(Self, Path)> {
-        Self::from_uri_and_params(uri, &ObjectStoreParams::default()).await
+        let registry = Arc::new(ObjectStoreRegistry::default());
+
+        Self::from_uri_and_params(registry, uri, &ObjectStoreParams::default()).await
     }
 
     /// Parse from a string URI.
     ///
     /// Returns the ObjectStore instance and the absolute path to the object.
     pub async fn from_uri_and_params(
+        registry: Arc<ObjectStoreRegistry>,
         uri: &str,
         params: &ObjectStoreParams,
     ) -> Result<(Self, Path)> {
@@ -357,7 +375,7 @@ impl ObjectStore {
                 Self::from_path(uri, params)
             }
             Ok(url) => {
-                let store = Self::new_from_url(url.clone(), params.clone()).await?;
+                let store = Self::new_from_url(registry, url.clone(), params.clone()).await?;
                 let path = Path::from(url.path());
                 Ok((store, path))
             }
@@ -442,9 +460,14 @@ impl ObjectStore {
         ))
     }
 
-    async fn new_from_url(url: Url, params: ObjectStoreParams) -> Result<Self> {
-        configure_store(url.as_str(), params).await
+    async fn new_from_url(
+        registry: Arc<ObjectStoreRegistry>,
+        url: Url,
+        params: ObjectStoreParams,
+    ) -> Result<Self> {
+        configure_store(registry, url.as_str(), params).await
     }
+
     /// Local object store.
     pub fn local() -> Self {
         Self {
@@ -712,7 +735,11 @@ impl From<HashMap<String, String>> for StorageOptions {
     }
 }
 
-async fn configure_store(url: &str, options: ObjectStoreParams) -> Result<ObjectStore> {
+async fn configure_store(
+    registry: Arc<ObjectStoreRegistry>,
+    url: &str,
+    options: ObjectStoreParams,
+) -> Result<ObjectStore> {
     let mut storage_options = StorageOptions(options.storage_options.unwrap_or_default());
     let mut url = ensure_table_uri(url)?;
     // Block size: On local file systems, we use 4KB block size. On cloud
@@ -872,10 +899,16 @@ async fn configure_store(url: &str, options: ObjectStoreParams) -> Result<Object
                 .clone()
                 .unwrap_or_else(|| Arc::new(RenameCommitHandler)),
         }),
-        s => Err(Error::IO {
-            message: format!("Unsupported URI scheme: {}", s),
-            location: location!(),
-        }),
+        s => {
+            if let Some(provider) = registry.providers.get(s) {
+                provider.new_store(url)
+            } else {
+                Err(Error::IO {
+                    message: format!("Unsupported URI scheme: {}", s),
+                    location: location!(),
+                })
+            }
+        }
     }
 }
 
@@ -950,10 +983,8 @@ pub fn ensure_table_uri(table_uri: impl AsRef<str>) -> Result<Url> {
                 Error::InvalidTableLocation { message: msg }
             })?)
         // NOTE this check is required to support absolute windows paths which may properly parse as url
-        } else if KNOWN_SCHEMES.contains(&url.scheme()) {
-            UriType::Url(url)
         } else {
-            UriType::LocalPath(PathBuf::from(table_uri))
+            UriType::Url(url)
         }
     } else {
         UriType::LocalPath(PathBuf::from(table_uri))

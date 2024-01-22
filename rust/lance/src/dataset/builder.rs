@@ -15,7 +15,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use lance_core::io::{
     commit::CommitHandler,
-    object_store::{ObjectStore, ObjectStoreParams},
+    object_store::{ObjectStore, ObjectStoreParams, ObjectStoreRegistry},
 };
 use object_store::{aws::AwsCredentialProvider, DynObjectStore};
 use snafu::{location, Location};
@@ -40,6 +40,7 @@ pub struct DatasetBuilder {
     options: ObjectStoreParams,
     version: Option<u64>,
     table_uri: String,
+    object_store_registry: Arc<ObjectStoreRegistry>,
 }
 
 impl DatasetBuilder {
@@ -51,6 +52,7 @@ impl DatasetBuilder {
             options: ObjectStoreParams::default(),
             session: None,
             version: None,
+            object_store_registry: Arc::new(ObjectStoreRegistry::default()),
         }
     }
 }
@@ -151,6 +153,8 @@ impl DatasetBuilder {
             self.session = Some(session);
         }
 
+        self.object_store_registry = read_params.object_store_registry.clone();
+
         self
     }
 
@@ -161,6 +165,11 @@ impl DatasetBuilder {
     /// If this is set, then `with_index_cache_size` and `with_metadata_cache_size` are ignored.
     pub fn with_session(mut self, session: Arc<Session>) -> Self {
         self.session = Some(session);
+        self
+    }
+
+    pub fn with_object_store_registry(mut self, registry: Arc<ObjectStoreRegistry>) -> Self {
+        self.object_store_registry = registry;
         self
     }
 
@@ -175,8 +184,13 @@ impl DatasetBuilder {
                 self.options.object_store_wrapper,
             )),
             None => {
-                let (store, _path) =
-                    ObjectStore::from_uri_and_params(&self.table_uri, &self.options).await?;
+                let (store, _path) = ObjectStore::from_uri_and_params(
+                    self.object_store_registry,
+                    &self.table_uri,
+                    &self.options,
+                )
+                .await?;
+
                 Ok(store)
             }
         }
@@ -196,6 +210,7 @@ impl DatasetBuilder {
 
         let object_store = self.build_object_store().await?;
         let base_path = object_store.base_path();
+
         let manifest = match version {
             Some(version) => {
                 object_store

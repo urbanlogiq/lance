@@ -26,7 +26,7 @@ use lance_core::{
     datatypes::Schema,
     format::Fragment,
     io::{
-        object_store::{ObjectStore, ObjectStoreParams},
+        object_store::{ObjectStore, ObjectStoreParams, ObjectStoreRegistry},
         FileWriter,
     },
     Error, Result,
@@ -80,6 +80,18 @@ pub struct WriteParams {
     pub store_params: Option<ObjectStoreParams>,
 
     pub progress: Arc<dyn WriteFragmentProgress>,
+
+    pub object_store_registry: Arc<ObjectStoreRegistry>,
+}
+
+impl WriteParams {
+    pub fn with_object_store_registry(
+        mut self,
+        object_store_registry: Arc<ObjectStoreRegistry>,
+    ) -> Self {
+        self.object_store_registry = object_store_registry;
+        self
+    }
 }
 
 impl Default for WriteParams {
@@ -93,6 +105,7 @@ impl Default for WriteParams {
             mode: WriteMode::Create,
             store_params: None,
             progress: Arc::new(NoopFragmentWriteProgress::new()),
+            object_store_registry: Arc::new(ObjectStoreRegistry::default()),
         }
     }
 }
@@ -139,6 +152,7 @@ pub async fn write_fragments(
     params: WriteParams,
 ) -> Result<Vec<Fragment>> {
     let (object_store, base) = ObjectStore::from_uri_and_params(
+        params.object_store_registry.clone(),
         dataset_uri,
         &params.store_params.clone().unwrap_or_default(),
     )

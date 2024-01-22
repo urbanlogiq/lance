@@ -99,6 +99,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::{StreamExt, TryStreamExt};
+use lance_core::io::object_store::ObjectStoreRegistry;
 use roaring::{RoaringBitmap, RoaringTreemap};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -252,7 +253,11 @@ pub async fn compact_files(
     dataset: &mut Dataset,
     mut options: CompactionOptions,
     remap_options: Option<Arc<dyn IndexRemapperOptions>>,
+    object_store_registry: Option<Arc<ObjectStoreRegistry>>,
 ) -> Result<CompactionMetrics> {
+    let object_store_registry =
+        object_store_registry.unwrap_or_else(|| Arc::new(ObjectStoreRegistry::default()));
+
     options.validate();
 
     let compaction_plan: CompactionPlan = plan_compaction(dataset, &options).await?;
@@ -265,7 +270,14 @@ pub async fn compact_files(
     let dataset_ref = &dataset.clone();
 
     let result_stream = futures::stream::iter(compaction_plan.tasks.into_iter())
-        .map(|task| rewrite_files(Cow::Borrowed(dataset_ref), task, &options))
+        .map(|task| {
+            rewrite_files(
+                Cow::Borrowed(dataset_ref),
+                task,
+                &options,
+                object_store_registry.clone(),
+            )
+        })
         .buffer_unordered(options.num_threads);
 
     let completed_tasks: Vec<RewriteResult> = result_stream.try_collect().await?;
@@ -376,13 +388,23 @@ impl CompactionTask {
     /// Note: you should pass the version of the dataset that is the same as
     /// the read version for this task (the same version from which the
     /// compaction was planned).
-    pub async fn execute(&self, dataset: &Dataset) -> Result<RewriteResult> {
+    pub async fn execute(
+        &self,
+        dataset: &Dataset,
+        object_store_registry: Arc<ObjectStoreRegistry>,
+    ) -> Result<RewriteResult> {
         let dataset = if dataset.manifest.version == self.read_version {
             Cow::Borrowed(dataset)
         } else {
             Cow::Owned(dataset.checkout_version(self.read_version).await?)
         };
-        rewrite_files(dataset, self.task.clone(), &self.options).await
+        rewrite_files(
+            dataset,
+            self.task.clone(),
+            &self.options,
+            object_store_registry,
+        )
+        .await
     }
 }
 
@@ -759,6 +781,7 @@ async fn rewrite_files(
     dataset: Cow<'_, Dataset>,
     task: TaskData,
     options: &CompactionOptions,
+    object_store_registry: Arc<ObjectStoreRegistry>,
 ) -> Result<RewriteResult> {
     let mut metrics = CompactionMetrics::default();
 
@@ -794,6 +817,7 @@ async fn rewrite_files(
         max_rows_per_file: options.target_rows_per_fragment,
         max_rows_per_group: options.max_rows_per_group,
         mode: WriteMode::Append,
+        object_store_registry,
         ..Default::default()
     };
     let mut new_fragments = write_fragments_internal(

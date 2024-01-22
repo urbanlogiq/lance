@@ -32,7 +32,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use futures::{Future, FutureExt, Stream};
 use lance_core::io::{
     commit::CommitError,
-    object_store::{ObjectStore, ObjectStoreParams},
+    object_store::{ObjectStore, ObjectStoreParams, ObjectStoreRegistry},
     read_metadata_offset, read_struct,
     reader::{read_manifest, read_manifest_indexes},
     write_manifest, ObjectWriter, WriteExt,
@@ -137,6 +137,8 @@ pub struct ReadParams {
     pub session: Option<Arc<Session>>,
 
     pub store_options: Option<ObjectStoreParams>,
+
+    pub object_store_registry: Arc<ObjectStoreRegistry>,
 }
 
 impl ReadParams {
@@ -157,6 +159,15 @@ impl ReadParams {
         self.session = Some(session);
         self
     }
+
+    /// Provide an object store registry for custom object stores.
+    pub fn with_object_store_registry(
+        mut self,
+        object_store_registry: Arc<ObjectStoreRegistry>,
+    ) -> Self {
+        self.object_store_registry = object_store_registry;
+        self
+    }
 }
 
 impl Default for ReadParams {
@@ -166,6 +177,7 @@ impl Default for ReadParams {
             metadata_cache_size: DEFAULT_METADATA_CACHE_SIZE,
             session: None,
             store_options: None,
+            object_store_registry: Arc::new(ObjectStoreRegistry::default()),
         }
     }
 }
@@ -184,7 +196,14 @@ impl Dataset {
     #[instrument(skip(params))]
     pub async fn open_with_params(uri: &str, params: &ReadParams) -> Result<Self> {
         let (mut object_store, base_path) = match params.store_options.as_ref() {
-            Some(store_options) => ObjectStore::from_uri_and_params(uri, store_options).await?,
+            Some(store_options) => {
+                ObjectStore::from_uri_and_params(
+                    params.object_store_registry.clone(),
+                    uri,
+                    store_options,
+                )
+                .await?
+            }
             None => ObjectStore::from_uri(uri).await?,
         };
 
@@ -344,9 +363,12 @@ impl Dataset {
     ) -> Result<Self> {
         let mut params = params.unwrap_or_default();
 
-        let (object_store, base) =
-            ObjectStore::from_uri_and_params(uri, &params.store_params.clone().unwrap_or_default())
-                .await?;
+        let (object_store, base) = ObjectStore::from_uri_and_params(
+            params.object_store_registry.clone(),
+            uri,
+            &params.store_params.clone().unwrap_or_default(),
+        )
+        .await?;
 
         // Read expected manifest path for the dataset
         let dataset_exists = match object_store
@@ -391,6 +413,7 @@ impl Dataset {
                 DatasetBuilder::from_uri(uri)
                     .with_read_params(ReadParams {
                         store_options: params.store_params.clone(),
+                        object_store_registry: params.object_store_registry.clone(),
                         ..Default::default()
                     })
                     .load()
@@ -654,6 +677,7 @@ impl Dataset {
         operation: Operation,
         read_version: Option<u64>,
         store_params: Option<ObjectStoreParams>,
+        object_store_registry: Arc<ObjectStoreRegistry>,
     ) -> Result<Self> {
         let read_version = read_version.map_or_else(
             || match operation {
@@ -666,9 +690,12 @@ impl Dataset {
             Ok,
         )?;
 
-        let (object_store, base) =
-            ObjectStore::from_uri_and_params(base_uri, &store_params.clone().unwrap_or_default())
-                .await?;
+        let (object_store, base) = ObjectStore::from_uri_and_params(
+            object_store_registry.clone(),
+            base_uri,
+            &store_params.clone().unwrap_or_default(),
+        )
+        .await?;
 
         // Test if the dataset exists
         let dataset_exists = match object_store
@@ -694,6 +721,7 @@ impl Dataset {
                 DatasetBuilder::from_uri(base_uri)
                     .with_read_params(ReadParams {
                         store_options: store_params.clone(),
+                        object_store_registry: object_store_registry.clone(),
                         ..Default::default()
                     })
                     .load()
