@@ -105,13 +105,10 @@ tempfile.workspace = true
 test-log.workspace = true
 tracing-chrome = "0.7.1"
 rstest = { workspace = true }
-# For S3 / DynamoDB tests
-aws-config = { workspace = true }
-aws-sdk-s3 = { workspace = true }
 
 
 [features]
-default = ["aws", "azure", "gcp", "oss"]
+default = []
 fp16kernels = ["lance-linalg/fp16kernels"]
 # Prevent dynamic linking of lzma, which comes from datafusion
 cli = ["dep:clap", "lzma-sys/static"]
