@@ -16,7 +16,6 @@ default = []
 rest = ["dep:reqwest", "dep:serde_json", "dep:url"]
 # Cloud storage features for directory implementation - align with lance-io
 dir-gcp = ["lance-io/gcp"]
-dir-aws = ["lance-io/aws"]
 dir-azure = ["lance-io/azure"]
 dir-oss = ["lance-io/oss"]
 
