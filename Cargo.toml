@@ -236,7 +236,7 @@ strip = "debuginfo"
 incremental = false
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)', 'cfg(feature, values("aws", "dynamodb", "dynamodb_tests", "credential-vendor-aws", "dir-aws"))'] }
 unsafe_op_in_unsafe_fn = "allow"
 
 [workspace.lints.clippy]
