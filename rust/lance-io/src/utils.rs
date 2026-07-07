@@ -93,12 +93,22 @@ pub async fn read_message<M: Message + Default>(reader: &dyn Reader, pos: usize)
     let range = pos..min(pos + reader.block_size(), file_size);
     let buf = reader.get_range(range.clone()).await?;
     let msg_len = LittleEndian::read_u32(&buf) as usize;
+    let expected_len = msg_len + 4;
 
-    if msg_len + 4 > buf.len() {
+    if expected_len > buf.len() {
         let remaining_range = range.end..min(4 + pos + msg_len, file_size);
         let remaining_bytes = reader.get_range(remaining_range).await?;
         let buf = [buf, remaining_bytes].concat();
-        assert!(buf.len() >= msg_len + 4);
+        // Return an error instead of panicking if the buffer length mismatches declared message length
+        let buf_len = buf.len();
+        if buf_len < expected_len {
+            return Err(Error::io(
+                format!(
+                    "Mismatched buffer length {buf_len} in read_message, expected {expected_len}"
+                ),
+                location!(),
+            ));
+        }
         Ok(M::decode(&buf[4..4 + msg_len])?)
     } else {
         Ok(M::decode(&buf[4..4 + msg_len])?)
