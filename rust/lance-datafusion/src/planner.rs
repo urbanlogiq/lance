@@ -25,8 +25,8 @@ use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::planner::{ExprPlanner, PlannerResult, RawFieldAccessExpr};
 use datafusion::logical_expr::{
-    AggregateUDF, ColumnarValue, GetFieldAccess, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
-    Signature, Volatility, WindowUDF,
+    AggregateUDF, ColumnarValue, GetFieldAccess, HigherOrderUDF, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, Volatility, WindowUDF,
 };
 use datafusion::optimizer::simplify_expressions::SimplifyContext;
 use datafusion::sql::planner::{
@@ -48,7 +48,6 @@ use datafusion_functions::core::getfield::GetFieldFunc;
 use lance_core::datatypes::Schema;
 use lance_core::error::LanceOptionExt;
 
-use chrono::Utc;
 use lance_core::{Error, Result};
 
 /// Encode a JSON string into a JSONB `LargeBinary` literal expression.
@@ -72,10 +71,6 @@ impl CastListF16Udf {
 }
 
 impl ScalarUDFImpl for CastListF16Udf {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "_cast_list_f16"
     }
@@ -195,6 +190,18 @@ impl ContextProvider for LanceContextProvider {
 
     fn get_window_meta(&self, name: &str) -> Option<Arc<WindowUDF>> {
         self.state.window_functions().get(name).cloned()
+    }
+
+    fn get_higher_order_meta(&self, name: &str) -> Option<Arc<HigherOrderUDF>> {
+        self.state.higher_order_functions().get(name).cloned()
+    }
+
+    fn higher_order_function_names(&self) -> Vec<String> {
+        self.state
+            .higher_order_functions()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn get_function_meta(&self, f: &str) -> Option<Arc<ScalarUDF>> {
@@ -747,10 +754,10 @@ impl Planner {
                 data_type, value, ..
             }) => {
                 let value = value.clone().into_string().expect_ok()?;
-                Ok(Expr::Cast(datafusion::logical_expr::Cast {
-                    expr: Box::new(Expr::Literal(ScalarValue::Utf8(Some(value)), None)),
-                    data_type: self.parse_type(data_type)?,
-                }))
+                Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
+                    Box::new(Expr::Literal(ScalarValue::Utf8(Some(value)), None)),
+                    self.parse_type(data_type)?,
+                )))
             }
             SQLExpr::IsFalse(expr) => Ok(Expr::IsFalse(Box::new(self.parse_sql_expr(expr)?))),
             SQLExpr::IsNotFalse(expr) => Ok(Expr::IsNotFalse(Box::new(self.parse_sql_expr(expr)?))),
@@ -783,8 +790,11 @@ impl Planner {
                 Box::new(self.parse_sql_expr(expr)?),
                 Box::new(self.parse_sql_expr(pattern)?),
                 match escape_char {
-                    Some(Value::SingleQuotedString(char)) => char.chars().next(),
-                    Some(value) => {
+                    Some(ValueWithSpan {
+                        value: Value::SingleQuotedString(char),
+                        ..
+                    }) => char.chars().next(),
+                    Some(ValueWithSpan { value, .. }) => {
                         return Err(Error::invalid_input(format!(
                             "Invalid escape character in LIKE expression. Expected a single character wrapped with single quotes, got {}",
                             value
@@ -805,8 +815,11 @@ impl Planner {
                 Box::new(self.parse_sql_expr(expr)?),
                 Box::new(self.parse_sql_expr(pattern)?),
                 match escape_char {
-                    Some(Value::SingleQuotedString(char)) => char.chars().next(),
-                    Some(value) => {
+                    Some(ValueWithSpan {
+                        value: Value::SingleQuotedString(char),
+                        ..
+                    }) => char.chars().next(),
+                    Some(ValueWithSpan { value, .. }) => {
                         return Err(Error::invalid_input(format!(
                             "Invalid escape character in LIKE expression. Expected a single character wrapped with single quotes, got {}",
                             value
@@ -838,15 +851,15 @@ impl Planner {
             } => match kind {
                 datafusion::sql::sqlparser::ast::CastKind::TryCast
                 | datafusion::sql::sqlparser::ast::CastKind::SafeCast => {
-                    Ok(Expr::TryCast(datafusion::logical_expr::TryCast {
-                        expr: Box::new(self.parse_sql_expr(expr)?),
-                        data_type: self.parse_type(data_type)?,
-                    }))
+                    Ok(Expr::TryCast(datafusion::logical_expr::TryCast::new(
+                        Box::new(self.parse_sql_expr(expr)?),
+                        self.parse_type(data_type)?,
+                    )))
                 }
-                _ => Ok(Expr::Cast(datafusion::logical_expr::Cast {
-                    expr: Box::new(self.parse_sql_expr(expr)?),
-                    data_type: self.parse_type(data_type)?,
-                })),
+                _ => Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
+                    Box::new(self.parse_sql_expr(expr)?),
+                    self.parse_type(data_type)?,
+                ))),
             },
             SQLExpr::JsonAccess { .. } => Err(Error::invalid_input("JSON access is not supported")),
             SQLExpr::CompoundFieldAccess { root, access_chain } => {
@@ -991,9 +1004,10 @@ impl Planner {
 
         // DataFusion needs the coerce and simplify passes to be applied before
         // expressions can be handled by the physical planner.
-        let simplify_context = SimplifyContext::default()
+        let simplify_context = SimplifyContext::builder()
             .with_schema(df_schema.clone())
-            .with_query_execution_start_time(Some(Utc::now()));
+            .with_current_time()
+            .build();
         let simplifier =
             datafusion::optimizer::simplify_expressions::ExprSimplifier::new(simplify_context);
 
@@ -1080,7 +1094,6 @@ impl TreeNodeVisitor<'_> for ColumnCapturingVisitor {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
 
     use crate::logical_expr::ExprExt;
 
@@ -1200,10 +1213,6 @@ mod tests {
     }
 
     impl ScalarUDFImpl for StrictFloat64Udf {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn name(&self) -> &str {
             "strict_float64"
         }
@@ -1605,7 +1614,7 @@ mod tests {
 
             match expr {
                 Expr::BinaryExpr(BinaryExpr { right, .. }) => match right.as_ref() {
-                    Expr::Cast(Cast { expr, data_type }) => {
+                    Expr::Cast(Cast { expr, field }) => {
                         match expr.as_ref() {
                             Expr::Literal(ScalarValue::Utf8(Some(value_str)), _) => {
                                 assert_eq!(value_str, expected_value_str);
@@ -1615,7 +1624,7 @@ mod tests {
                             }
                             _ => panic!("Expected cast to be applied to literal"),
                         }
-                        assert_eq!(data_type, expected_data_type);
+                        assert_eq!(field.data_type(), expected_data_type);
                     }
                     _ => panic!("Expected right to be a cast"),
                 },
@@ -1656,14 +1665,14 @@ mod tests {
 
             match expr {
                 Expr::BinaryExpr(BinaryExpr { right, .. }) => match right.as_ref() {
-                    Expr::Cast(Cast { expr, data_type }) => {
+                    Expr::Cast(Cast { expr, field }) => {
                         match expr.as_ref() {
                             Expr::Literal(ScalarValue::Utf8(Some(value_str)), _) => {
                                 assert_eq!(value_str, expected_value_str);
                             }
                             _ => panic!("Expected cast to be applied to literal"),
                         }
-                        assert_eq!(data_type, expected_data_type);
+                        assert_eq!(field.data_type(), expected_data_type);
                     }
                     _ => panic!("Expected right to be a cast"),
                 },

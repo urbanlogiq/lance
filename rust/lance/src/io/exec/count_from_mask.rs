@@ -395,10 +395,6 @@ impl ExecutionPlan for CountFromMaskExec {
         "CountFromMaskExec"
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -463,11 +459,11 @@ impl ExecutionPlan for CountFromMaskExec {
     fn partition_statistics(
         &self,
         _partition: Option<usize>,
-    ) -> datafusion::error::Result<datafusion::physical_plan::Statistics> {
-        Ok(datafusion::physical_plan::Statistics {
+    ) -> datafusion::error::Result<Arc<datafusion::physical_plan::Statistics>> {
+        Ok(Arc::new(datafusion::physical_plan::Statistics {
             num_rows: datafusion::common::stats::Precision::Exact(1),
             ..datafusion::physical_plan::Statistics::new_unknown(&self.schema)
-        })
+        }))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -494,8 +490,8 @@ mod tests {
     use datafusion::logical_expr::lit;
     use datafusion::physical_expr::execution_props::ExecutionProps;
     use datafusion::physical_plan::ExecutionPlan;
-    use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
     use datafusion::scalar::ScalarValue;
+    use datafusion_physical_expr::aggregate::LoweredAggregateBuilder;
     use futures::TryStreamExt;
     use lance_core::utils::tempfile::TempStrDir;
     use lance_datagen::gen_batch;
@@ -517,14 +513,15 @@ mod tests {
     fn count_star_expr(input_schema: &SchemaRef) -> Arc<AggregateFunctionExpr> {
         let expr = functions_aggregate::count::count(lit(1));
         let df_schema = DFSchema::try_from(input_schema.as_ref().clone()).unwrap();
-        let (agg_expr, _filter, _order_by) = create_aggregate_expr_and_maybe_filter(
+        LoweredAggregateBuilder::new(
             &expr,
             &df_schema,
             input_schema.as_ref(),
             &ExecutionProps::default(),
         )
-        .unwrap();
-        agg_expr
+        .build()
+        .unwrap()
+        .aggregate
     }
 
     struct Fixture {
